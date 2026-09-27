@@ -1,4 +1,4 @@
-# Meeting Memory
+# Post Meeting AI
 
 Turns pasted meeting notes into a summary, decisions, action items, risks,
 dependencies, and technical learnings — and refuses to draft the follow-up
