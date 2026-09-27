@@ -1,0 +1,15 @@
+{
+  "slug": "3_conflicting_decisions",
+  "expected_action_items": [
+    "set up a RabbitMQ proof of concept",
+    "update the ADR"
+  ],
+  "expected_decisions": [
+    "use RabbitMQ for the event bus",
+    "use SQS instead and revisit in six months"
+  ],
+  "expected_blocking_gap_count": 2,
+  "expected_missing_owner_count": 0,
+  "expected_conflicting_decision_count": 1,
+  "must_not_fabricate": []
+}

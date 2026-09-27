@@ -1,0 +1,23 @@
+ Build a Specialized Subagent
+
+Move from reusable skills to autonomous, specialized workers. Identify a part of your project that deserves its own subagent with a clear responsibility, bounded context, and defined output.
+
+What you need to do
+
+·        Identify a task that would benefit from being handled independently.
+
+·        Explain why it needs a subagent rather than a normal prompt or skill. Consider whether it requires independent reasoning, dedicated context, or independent operation.
+
+·        Define the subagent's purpose, responsibilities, context, tools, inputs, outputs, constraints, and calling conditions.
+
+·        Build and test the subagent and connect it to your project where appropriate.
+
+Submission
+
+·        Required: Working subagent package.
+
+·        Required: GitHub repository or individual implementation files.
+
+·        Required: Brief explanation of what the subagent does, why it needs to be a subagent, when it is called, and what context it receives.
+
+Optional: Loom walkthrough and example inputs/outputs.

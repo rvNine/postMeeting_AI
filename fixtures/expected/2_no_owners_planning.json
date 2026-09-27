@@ -1,0 +1,18 @@
+{
+  "slug": "2_no_owners_planning",
+  "expected_action_items": [
+    "audit the error budget burn from Q3",
+    "put together a reliability scorecard before the board update",
+    "rewrite the on-call rota",
+    "document the incident review process",
+    "talk to the infra vendor about contract renewal",
+    "write up the Q1 mobile scope"
+  ],
+  "expected_decisions": [
+    "focus on reliability over new features for the first six weeks",
+    "mobile app work slips to Q1"
+  ],
+  "expected_blocking_gap_count": 12,
+  "expected_missing_owner_count": 6,
+  "must_not_fabricate": ["Priya", "Sam", "Dan", "Alia", "Marcus"]
+}

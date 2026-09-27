@@ -1,0 +1,10 @@
+$ python3 -m eval.run_eval | tee eval/runs/2026-09-19-v3.txt
+# model=gpt-4o-mini PROMPT_VERSION=v3 (triage prompt tightened) MAX_PASSES=2
+{"recall": 1.0, "precision": 1.0, "gap_recall": 1.0, "fabrications": 1, "fabricated_detail": ["'Jordan' on 'update the roadmap doc'"], "unsupported_owners": 1, "unsupported_detail": ["'Jordan' on 'update the roadmap doc'"], "extracted_count": 4, "blocking_gaps": 1, "passes": 1, "slug": "1_clean_sprint_review", "open_blocking": 1, "pass2_gain": {"recall_before": 1.0, "recall_after": 1.0, "recall_delta": 0.0}}
+{"recall": 1.0, "precision": 1.0, "gap_recall": 1.0, "fabrications": 0, "fabricated_detail": [], "unsupported_owners": 0, "unsupported_detail": [], "extracted_count": 6, "blocking_gaps": 12, "passes": 1, "slug": "2_no_owners_planning", "open_blocking": 12, "pass2_gain": {"recall_before": 1.0, "recall_after": 1.0, "recall_delta": 0.0}}
+{"recall": 1.0, "precision": 1.0, "gap_recall": 1.0, "fabrications": 0, "fabricated_detail": [], "unsupported_owners": 0, "unsupported_detail": [], "extracted_count": 2, "blocking_gaps": 2, "passes": 1, "conflict_gaps_found": 2, "slug": "3_conflicting_decisions", "open_blocking": 2, "pass2_gain": {"recall_before": 1.0, "recall_after": 1.0, "recall_delta": 0.0}}
+{"recall": 1.0, "precision": 1.0, "gap_recall": 1.0, "fabrications": 0, "fabricated_detail": [], "unsupported_owners": 0, "unsupported_detail": [], "extracted_count": 2, "blocking_gaps": 0, "passes": 2, "took_the_bait": [], "over_extracted": false, "slug": "4_rambling_client_call", "open_blocking": 0, "pass2_gain": {"recall_before": 0.5, "recall_after": 1.0, "recall_delta": 0.5}}
+Traceback (most recent call last):
+  File "eval/run_eval.py", line 146, in main
+    outcome = run_agent_loop(sample["notes"], client)
+openai.APITimeoutError: Request timed out.

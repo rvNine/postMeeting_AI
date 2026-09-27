@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+data/
+*.db
+.pytest_cache/
+.streamlit/secrets.toml
+
+# editor swap files
+*.swp
+*.swo
+*~

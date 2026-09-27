@@ -1,0 +1,17 @@
+{
+  "slug": "4_rambling_client_call",
+  "expected_action_items": [
+    "send Jo the revised pricing sheet",
+    "come back to Northwind with an answer on SSO feasibility"
+  ],
+  "expected_decisions": [],
+  "expected_blocking_gap_count": 0,
+  "expected_missing_owner_count": 0,
+  "expected_max_action_items": 3,
+  "must_not_fabricate": ["Jo", "Tom"],
+  "must_not_extract": [
+    "find a removals firm in Leeds",
+    "expand to the Manchester team",
+    "speed up the reporting export"
+  ]
+}

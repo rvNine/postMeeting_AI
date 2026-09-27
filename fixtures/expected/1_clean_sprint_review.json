@@ -1,0 +1,16 @@
+{
+  "slug": "1_clean_sprint_review",
+  "expected_action_items": [
+    "write the retry migration plan",
+    "add error alerting to the payments dashboard",
+    "run the load test against staging",
+    "update the roadmap doc"
+  ],
+  "expected_decisions": [
+    "move the payment retry logic into the API layer",
+    "keep the current Redis cluster rather than migrating to ElastiCache"
+  ],
+  "expected_blocking_gap_count": 0,
+  "expected_missing_owner_count": 0,
+  "must_not_fabricate": []
+}

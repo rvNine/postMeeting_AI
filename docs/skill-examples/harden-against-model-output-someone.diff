@@ -1,0 +1,875 @@
+diff -ru '--exclude=__pycache__' '--exclude=.claude' '--exclude=.superpowers' '--exclude=data' ./agent/gaps.py agent/gaps.py
+--- ./agent/gaps.py	2026-09-16 00:53:49.923390396 +0530
++++ agent/gaps.py	2026-09-20 02:48:01.583753822 +0530
+@@ -5,7 +5,8 @@
+ step and re-flags anything mechanically detectable, so a reviewer that rubber-
+ stamps its own extraction cannot unblock the gate.
+ """
+-from agent.schemas import Gap, GapType, MeetingExtraction, Severity, normalize_optional_text
++from agent.schemas import (Gap, GapType, MeetingExtraction, Severity,
++                           normalize_optional_text, normalize_owner)
+ 
+ BLOCKING_TYPES: frozenset[GapType] = frozenset({
+     GapType.MISSING_OWNER,
+@@ -22,6 +23,15 @@
+     return normalize_optional_text(value) is None
+ 
+ 
++def _is_blank_owner(value: str | None) -> bool:
++    """Blank, a placeholder, or a word that names no one in particular.
++
++    A separate predicate because the rule is owner-specific: "someone" is not a
++    person, but it is ordinary text in a deadline string or a rationale.
++    """
++    return normalize_owner(value) is None
++
++
+ def _structural_id(target_id: str, gap_type: GapType) -> str:
+     """Stable id, so resolving a gap survives a re-render."""
+     return f"struct::{target_id}::{gap_type.value}"
+@@ -31,7 +41,7 @@
+     """Deterministic backstop. Runs regardless of what the reviewer returned."""
+     gaps: list[Gap] = []
+     for item in extraction.action_items:
+-        if _is_blank(item.owner):
++        if _is_blank_owner(item.owner):
+             gaps.append(Gap(
+                 id=_structural_id(item.id, GapType.MISSING_OWNER),
+                 type=GapType.MISSING_OWNER,
+diff -ru '--exclude=__pycache__' '--exclude=.claude' '--exclude=.superpowers' '--exclude=data' ./agent/pipeline.py agent/pipeline.py
+--- ./agent/pipeline.py	2026-09-18 12:47:50.660082820 +0530
++++ agent/pipeline.py	2026-09-20 02:48:01.584094511 +0530
+@@ -22,6 +22,7 @@
+     TriageResult,
+     TriageVerdict,
+     normalize_optional_text,
++    normalize_owner,
+ )
+ 
+ 
+@@ -148,7 +149,7 @@
+     # by a human after gap detection ran), and DRAFT_SYSTEM promises the model
+     # every item has a confirmed owner and deadline. Verify that directly.
+     incomplete = [a for a in action_items
+-                  if normalize_optional_text(a.owner) is None
++                  if normalize_owner(a.owner) is None
+                   or normalize_optional_text(a.deadline) is None]
+     if incomplete:
+         summary = "; ".join(f"{a.task!r} (owner={a.owner!r}, deadline={a.deadline!r})"
+diff -ru '--exclude=__pycache__' '--exclude=.claude' '--exclude=.superpowers' '--exclude=data' ./agent/schemas.py agent/schemas.py
+--- ./agent/schemas.py	2026-09-17 20:56:13.336423784 +0530
++++ agent/schemas.py	2026-09-20 02:49:32.070642822 +0530
+@@ -5,6 +5,7 @@
+     bounds are enforced with validators, which do not reach the schema.
+   * Structured Outputs has no date type, so deadlines travel as ISO strings.
+ """
++import re
+ from dataclasses import dataclass
+ from datetime import date
+ from enum import StrEnum
+@@ -60,6 +61,65 @@
+     return stripped
+ 
+ 
++# Words that name a CATEGORY of person rather than a person: indefinite
++# pronouns and unnamed collectives. Deliberately NOT merged into
++# PLACEHOLDER_VALUES — that list is shared by every optional text field, and
++# "someone has to own the release" is a perfectly good rationale. This rule is
++# about one field only.
++_NON_SPECIFIC_OWNER_WORDS: frozenset[str] = frozenset({
++    "someone", "somebody", "anyone", "anybody", "everyone", "everybody",
++    "no", "noone", "nobody", "one", "whoever", "who",
++    "team", "teams", "group", "squad", "crew", "folks", "people", "person",
++    "persons", "staff", "all", "both", "each", "every", "several", "many",
++    "multiple", "various", "other", "others", "someones",
++    "we", "us", "they", "them", "you", "i", "me", "myself", "ourselves",
++    "themselves", "owner", "owners", "assignee", "somebody's",
++})
++
++# Words that carry no identity by themselves, so they neither make an owner
++# specific nor make it vague: "the whole team" and "the rest of the team" are
++# the same nobody as "team".
++_OWNER_FILLER_WORDS: frozenset[str] = frozenset({
++    "the", "a", "an", "our", "my", "your", "their", "his", "her", "its",
++    "whole", "entire", "rest", "of", "on", "in", "from", "and", "or",
++    "else", "involved", "responsible", "relevant", "available", "here",
++})
++
++_OWNER_WORD = re.compile(r"[^\w']+")
++
++
++def normalize_owner(value: str | None) -> str | None:
++    """`normalize_optional_text`, plus: a category of person is not an owner.
++
++    The model is told to emit null when the notes name nobody. Sometimes it
++    copies the notes' own indefinite wording instead — "someone should chase
++    the vendor invoice this week" came back as owner="someone", and another
++    meeting produced owner="the team". Those are non-empty strings, so every
++    blank check downstream read them as a confirmed owner, the structural gap
++    never fired, and the gate opened on a follow-up that told a team "someone"
++    was chasing their invoice. An owner nobody agreed to is precisely what the
++    gate exists to stop, and a vague one is no better than an invented one.
++
++    The rule: strip the filler words, then if every word that remains is a
++    generic category word, the string names nobody. A NAMED group survives —
++    "Platform Team" keeps "platform", which is specific — because the product
++    asks for an owner a human confirmed, not for a human being.
++
++    Deliberately over-inclusive at the margins: a false block asks a manager a
++    question, a false pass sends a message naming someone who never agreed.
++    """
++    owner = normalize_optional_text(value)
++    if owner is None:
++        return None
++    words = [w for w in _OWNER_WORD.split(owner.lower()) if w]
++    content = [w for w in words if w not in _OWNER_FILLER_WORDS]
++    # `all()` on an empty list is True, which is the wanted answer: an owner of
++    # "the" or "!!!" has no content words and names nobody either.
++    if all(word in _NON_SPECIFIC_OWNER_WORDS for word in content):
++        return None
++    return owner
++
++
+ class Gap(BaseModel):
+     id: str
+     type: GapType
+@@ -78,7 +138,7 @@
+     confidence: float
+ 
+     _v_conf = field_validator("confidence")(_check_confidence)
+-    _v_owner_norm = field_validator("owner", mode="before")(normalize_optional_text)
++    _v_owner_norm = field_validator("owner", mode="before")(normalize_owner)
+     _v_deadline_norm = field_validator("deadline", mode="before")(normalize_optional_text)
+     _v_date = field_validator("deadline")(_check_iso_date)
+ 
+diff -ru '--exclude=__pycache__' '--exclude=.claude' '--exclude=.superpowers' '--exclude=data' ./docs/ARCHITECTURE.md docs/ARCHITECTURE.md
+--- ./docs/ARCHITECTURE.md	2026-09-18 12:47:50.660204664 +0530
++++ docs/ARCHITECTURE.md	2026-09-20 02:53:24.122067965 +0530
+@@ -51,7 +51,7 @@
+               └──────────────────────┘
+ ```
+ 
+-Single process. Four packages, ~2,100 lines of source, 265 tests. (Grown from
++Single process. Four packages, ~2,300 lines of source, 312 tests. (Grown from
+ ~1,700 lines / 166 tests since the loop, triage, context and memory were
+ added — see §4, §6, §12.)
+ 
+@@ -427,6 +427,7 @@
+ |---|---|
+ | guess an owner the notes never stated | forbids it in the prompt twice, and flags any null as a blocking gap |
+ | return the **string** `"null"`, `"N/A"`, `"TBD"` instead of JSON null | normalises placeholder strings to `None` at the schema boundary |
++| answer "who owns this?" with a category of person — `"someone"`, `"the team"`, `"everyone"`, `"we"` | normalises a non-specific owner to `None` at the schema boundary and at all three gate points (`agent.schemas.normalize_owner`), so it raises the same blocking `missing_owner` gap a null would. A *named* group (`"Platform Team"`) survives — the rule strips filler words and rejects only strings whose every remaining word is generic |
+ | return zero gaps for an obviously gappy extraction | runs a deterministic backstop unconditionally |
+ | tag a blocking gap type as a mere warning | blocks on type *or* severity |
+ | reuse the same id for a decision and an action item | namespaces ids by entity kind |
+@@ -441,6 +442,16 @@
+ depth, because attribute assignment after construction bypasses Pydantic
+ validators.
+ 
++`normalize_owner` sits beside it and wraps it: same shape, same layer, same
++defence in depth, but a **separate** predicate on purpose. Widening
++`PLACEHOLDER_VALUES` would have been the one-line version and it would have been
++wrong — that list is shared by every optional text field, and "someone has to own
++the release" is an ordinary rationale. A rule about one field belongs in a
++predicate about one field. `tests/test_layer_discipline.py` locks both halves:
++every owner-gating file must call `normalize_owner`, and none of them may gate an
++owner on `normalize_optional_text`, which is correct about blankness and wrong
++about owners.
++
+ ---
+ 
+ ## 8. Failure handling
+@@ -465,7 +476,7 @@
+ 
+ ---
+ 
+-## 9. Four defects that shaped this design
++## 9. Five defects that shaped this design
+ 
+ Each was found by running the system, not by reading it. Each is now a test.
+ 
+@@ -504,7 +515,21 @@
+ emitting the frozen `ai_*` columns and gating on both of them (§6), so nothing a
+ human typed can return to a prompt.
+ 
+-The pattern is worth naming: **all four lived at a boundary no single component
++**5. The model answered "who owns this?" with "someone".** Reported from real
++use. The notes said *"someone should chase the vendor invoice this week"*; the
++extraction came back with `owner="someone"`, and a second meeting produced
++`owner="the team"`. Neither is blank, neither is in `PLACEHOLDER_VALUES`, so the
++backstop raised no `missing_owner` gap, `draft_blocked` was False, `run_draft`
++passed both of its checks, and the follow-up went out telling a team that
++"someone" was chasing their invoice. Structurally this is defect 1 again — a
++non-empty string that names nobody — but one the placeholder list could not catch,
++because the model was not emitting a placeholder: it was faithfully copying the
++notes' own indefinite wording, which is exactly the wording that means *the notes
++did not say*. → `agent.schemas.normalize_owner`, a second field-specific predicate
++beside `normalize_optional_text` (not an extension of it — see §7), applied at the
++schema boundary and at all three gate points.
++
++The pattern is worth naming: **all five lived at a boundary no single component
+ owned** — the model's output meeting the schema's assumptions, ids crossing into
+ storage, the gap taxonomy crossing into the UI. Component-level tests were green
+ throughout.
+@@ -513,27 +538,27 @@
+ 
+ ## 10. Testing strategy
+ 
+-265 tests, no network, no API key required. Every test runs against
++312 tests, no network, no API key required. Every test runs against
+ `StubLLMClient` in `tests/conftest.py`, which returns queued responses and records
+ what it was asked.
+ 
+ | File | Tests | Covers |
+ |---|---|---|
+-| `test_pipeline.py` | 55 | extract/review/triage/draft, the backstop, fallback, the gate, `quote_supports` |
+-| `test_gap_display.py` | 45 | gate predicates, badges, resolution logic |
+-| `test_schemas.py` | 24 | validation, placeholder normalisation, `MeetingContext`/`OwnerHint`/`PriorCommitment` |
++| `test_pipeline.py` | 57 | extract/review/triage/draft, the backstop, fallback, the gate, `quote_supports` |
++| `test_gap_display.py` | 49 | gate predicates, badges, resolution logic |
++| `test_schemas.py` | 60 | validation, placeholder and non-specific-owner normalisation, `MeetingContext`/`OwnerHint`/`PriorCommitment` |
+ | `test_db.py` | 19 | persistence, id scoping, atomicity, the `ai_*` freeze |
+ | `test_ui_state.py` | 18 | input validation, deadline parsing, per-meeting state cleanup |
+-| `test_gaps.py` | 16 | gap detection, merge, blocking rules |
++| `test_gaps.py` | 18 | gap detection, merge, blocking rules |
+ | `test_loop.py` | 22 | the loop's control flow, the merge, the budget, invariants 3 and 5 |
+ | `test_eval_scoring.py` | 12 | the evaluation harness's own arithmetic, including `passes` and `pass2_gain` |
+-| `test_layer_discipline.py` | 11 | **the architecture itself**, including the owner-hints-never-reach-a-model lock |
++| `test_layer_discipline.py` | 13 | **the architecture itself**, including the owner-hints-never-reach-a-model lock and the two shared blank/owner predicates |
+ | `test_memory.py` | 14 | `owner_hints`, `prior_commitments` — the two read queries |
+ | `test_markdown_export.py` | 9 | the exported document |
+ | `test_llm_client.py` | 7 | retry classification, key secrecy |
+ | `test_fixtures.py` | 5 | fixtures pair with gold answers |
+ | `test_config.py` | 4 | configuration |
+-| `test_context_builder.py` | 4 | storage rows → `MeetingContext`, empty on failure |
++| `test_context_builder.py` | 5 | storage rows → `MeetingContext`, empty on failure, non-specific owners filtered |
+ 
+ `eval/run_eval.py` is separate and makes **real, billable** API calls. It is never
+ run by the test suite.
+Only in ./docs: assign2.txt
+Only in ./docs: claude-code-qa.md
+Only in ./docs: skill-examples
+Only in .: .env
+Only in .: .git
+@@ -5,6 +5,7 @@
+   "tests/test_config.py::test_get_api_key_returns_none_when_unset",
+   "tests/test_context_builder.py::test_a_failing_memory_query_yields_an_empty_context",
+   "tests/test_context_builder.py::test_a_human_supplied_owner_never_becomes_background",
++  "tests/test_context_builder.py::test_a_non_specific_owner_is_dropped_from_both_halves_of_memory",
+   "tests/test_context_builder.py::test_build_context_carries_both_halves",
+   "tests/test_context_builder.py::test_build_context_is_empty_on_a_fresh_database",
+   "tests/test_db.py::test_a_deleted_meeting_leaves_nothing_in_the_sidebar",
+@@ -46,11 +47,13 @@
+   "tests/test_gap_display.py::test_a_conflicting_decision_gap_is_not_data_fixable",
+   "tests/test_gap_display.py::test_badge_and_button_agree_on_a_placeholder_owner",
+   "tests/test_gap_display.py::test_badge_distinguishes_blocking_from_warning",
++  "tests/test_gap_display.py::test_draft_blocked_for_a_non_specific_owner",
+   "tests/test_gap_display.py::test_draft_blocked_for_a_placeholder_owner_string",
+   "tests/test_gap_display.py::test_draft_blocked_when_an_item_has_no_gap_but_blank_fields",
+   "tests/test_gap_display.py::test_draft_not_blocked_when_data_complete_and_gaps_resolved",
+   "tests/test_gap_display.py::test_every_blocking_gap_type_has_a_path_into_resolved_ids",
+   "tests/test_gap_display.py::test_format_prior_commitment_names_the_meeting_it_came_from",
++  "tests/test_gap_display.py::test_gap_is_not_satisfied_by_a_non_specific_owner",
+   "tests/test_gap_display.py::test_gap_is_not_satisfied_by_a_placeholder_deadline",
+   "tests/test_gap_display.py::test_gap_is_not_satisfied_by_a_placeholder_owner",
+   "tests/test_gap_display.py::test_gap_is_satisfied_can_only_ever_be_true_for_data_fixable_types",
+@@ -62,12 +65,14 @@
+   "tests/test_gap_display.py::test_gate_message_is_plural_for_several_gaps",
+   "tests/test_gap_display.py::test_gate_message_is_singular_for_one_gap",
+   "tests/test_gap_display.py::test_items_missing_fields_finds_blank_and_whitespace",
++  "tests/test_gap_display.py::test_items_missing_fields_flags_a_non_specific_owner",
+   "tests/test_gap_display.py::test_items_missing_fields_flags_a_placeholder_owner_string",
+   "tests/test_gap_display.py::test_items_with_blocking_gaps_sort_first",
+   "tests/test_gap_display.py::test_marking_a_conflict_resolved_unblocks_the_draft",
+   "tests/test_gap_display.py::test_owner_suggestion_claims_no_similarity_it_did_not_compute",
+   "tests/test_gap_display.py::test_owner_suggestion_does_not_offer_the_example_task_as_a_reason",
+   "tests/test_gap_display.py::test_owner_suggestion_is_none_without_hints",
++  "tests/test_gap_display.py::test_owner_suggestion_is_offered_over_a_non_specific_owner",
+   "tests/test_gap_display.py::test_owner_suggestion_names_who_and_how_often",
+   "tests/test_gap_display.py::test_owner_suggestion_only_appears_for_a_blank_owner",
+   "tests/test_gap_display.py::test_owner_suggestion_says_once_for_a_single_assignment",
+@@ -88,6 +93,7 @@
+   "tests/test_gap_display.py::test_unresolved_manual_gaps_drops_a_gap_once_it_is_resolved",
+   "tests/test_gap_display.py::test_unresolved_manual_gaps_ignores_a_non_blocking_warning",
+   "tests/test_gap_display.py::test_unresolved_manual_gaps_returns_the_conflict_gap_for_its_decision",
++  "tests/test_gaps.py::test_a_named_owner_still_produces_no_owner_gap",
+   "tests/test_gaps.py::test_blank_owner_string_counts_as_missing",
+   "tests/test_gaps.py::test_blocking_type_with_warning_severity_still_blocks",
+   "tests/test_gaps.py::test_complete_item_produces_no_gaps",
+@@ -100,6 +106,7 @@
+   "tests/test_gaps.py::test_merge_keeps_structural_gaps_the_model_missed",
+   "tests/test_gaps.py::test_missing_deadline_produces_a_blocking_gap",
+   "tests/test_gaps.py::test_missing_owner_produces_a_blocking_gap",
++  "tests/test_gaps.py::test_non_specific_owner_produces_a_blocking_gap",
+   "tests/test_gaps.py::test_open_blocking_counts_only_unresolved_blocking_gaps",
+   "tests/test_gaps.py::test_placeholder_owner_string_produces_a_blocking_gap",
+   "tests/test_gaps.py::test_resolving_a_blocking_type_gap_clears_it",
+@@ -109,8 +116,10 @@
+   "tests/test_layer_discipline.py::test_context_builder_is_streamlit_free",
+   "tests/test_layer_discipline.py::test_loop_does_not_import_storage_or_streamlit",
+   "tests/test_layer_discipline.py::test_no_converged_file_re_implements_a_blank_check",
++  "tests/test_layer_discipline.py::test_no_owner_check_uses_the_text_only_predicate",
+   "tests/test_layer_discipline.py::test_no_undefined_names_in_ui_or_agent",
+   "tests/test_layer_discipline.py::test_only_llm_client_imports_openai",
++  "tests/test_layer_discipline.py::test_owner_checks_all_use_the_shared_owner_predicate",
+   "tests/test_layer_discipline.py::test_owner_hints_are_never_read_by_the_agent_package",
+   "tests/test_layer_discipline.py::test_storage_does_not_import_openai_or_streamlit",
+   "tests/test_layer_discipline.py::test_ui_does_not_import_openai_or_sqlite",
+@@ -119,7 +128,6 @@
+   "tests/test_llm_client.py::test_auth_error_message_does_not_leak_the_key",
+   "tests/test_llm_client.py::test_client_defaults_to_the_pinned_model",
+   "tests/test_llm_client.py::test_client_refuses_to_construct_without_an_api_key",
+-  "tests/test_llm_client.py::test_error_message_never_contains_the_key",
+   "tests/test_llm_client.py::test_the_client_keeps_no_copy_of_the_key_in_its_own_state",
+   "tests/test_llm_client.py::test_transient_error_is_retried_then_wrapped",
+   "tests/test_llm_client.py::test_transient_success_after_one_failure",
+@@ -169,8 +177,10 @@
+   "tests/test_memory.py::test_prior_commitments_excludes_the_current_meeting",
+   "tests/test_memory.py::test_prior_commitments_needs_both_owner_and_deadline",
+   "tests/test_pipeline.py::test_a_background_name_cannot_become_an_owner",
++  "tests/test_pipeline.py::test_a_non_specific_owner_keeps_the_gate_shut_end_to_end",
+   "tests/test_pipeline.py::test_an_owner_hint_stays_out_of_a_prompt_that_has_a_background_block",
+   "tests/test_pipeline.py::test_clean_extraction_produces_no_blocking_gaps",
++  "tests/test_pipeline.py::test_draft_blocked_for_a_non_specific_owner_string",
+   "tests/test_pipeline.py::test_draft_blocked_for_a_placeholder_owner_string",
+   "tests/test_pipeline.py::test_draft_blocked_for_an_item_that_never_had_a_gap",
+   "tests/test_pipeline.py::test_draft_blocked_when_a_resolved_gap_left_the_field_empty",
+@@ -227,6 +237,40 @@
+   "tests/test_schemas.py::test_action_item_allows_null_owner_and_deadline",
+   "tests/test_schemas.py::test_action_item_deadline_placeholder_string_normalizes_to_none",
+   "tests/test_schemas.py::test_action_item_invalid_deadline_still_raises",
++  "tests/test_schemas.py::test_action_item_keeps_an_owner_that_actually_names_somebody[Dan and Sam]",
++  "tests/test_schemas.py::test_action_item_keeps_an_owner_that_actually_names_somebody[Mary-Jane]",
++  "tests/test_schemas.py::test_action_item_keeps_an_owner_that_actually_names_somebody[O'Brien]",
++  "tests/test_schemas.py::test_action_item_keeps_an_owner_that_actually_names_somebody[Platform Team]",
++  "tests/test_schemas.py::test_action_item_keeps_an_owner_that_actually_names_somebody[Priya]",
++  "tests/test_schemas.py::test_action_item_keeps_an_owner_that_actually_names_somebody[Sam Okonkwo]",
++  "tests/test_schemas.py::test_action_item_keeps_an_owner_that_actually_names_somebody[Team Rocket]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[  someone  ]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[Someone]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[The Team]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[all of us]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[all]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[anybody]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[anyone]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[everybody]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[everyone involved]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[everyone]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[group]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[no one]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[nobody]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[people]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[somebody]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[someone else]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[someone]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[team]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[the group]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[the owner]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[the rest of the team]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[the team]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[the whole team]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[they]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[us]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[we]",
++  "tests/test_schemas.py::test_action_item_non_specific_owner_normalizes_to_none[whoever]",
+   "tests/test_schemas.py::test_action_item_owner_placeholder_strings_normalize_to_none[  NULL  ]",
+   "tests/test_schemas.py::test_action_item_owner_placeholder_strings_normalize_to_none[N/A]",
+   "tests/test_schemas.py::test_action_item_owner_placeholder_strings_normalize_to_none[TBD]",
+@@ -245,6 +289,8 @@
+   "tests/test_schemas.py::test_meeting_context_defaults_to_empty",
+   "tests/test_schemas.py::test_meeting_context_is_not_empty_with_either_half",
+   "tests/test_schemas.py::test_meeting_extraction_composes",
++  "tests/test_schemas.py::test_non_specific_words_are_not_added_to_the_shared_placeholder_list",
++  "tests/test_schemas.py::test_normalize_owner_wraps_the_shared_blank_predicate",
+   "tests/test_schemas.py::test_schema_has_no_unsupported_jsonschema_keywords",
+   "tests/test_schemas.py::test_triage_result_schema_has_no_unsupported_jsonschema_keywords",
+   "tests/test_ui_state.py::test_can_analyze_sufficient_notes",
+diff -ru '--exclude=__pycache__' '--exclude=.claude' '--exclude=.superpowers' '--exclude=data' ./README.md README.md
+--- ./README.md	2026-09-17 20:56:13.333423853 +0530
++++ README.md	2026-09-20 02:53:24.123064708 +0530
+@@ -70,7 +70,8 @@
+   **Never sent to any model.** It is rendered beside a blank owner field in the
+   review screen as a suggestion; the field stays blank and stays blocking until a
+   person fills it in. `tests/test_layer_discipline.py` forbids any module under
+-  `agent/` from so much as reading the attribute.
++  `agent/` from so much as reading the attribute. A hint whose owner names nobody in
++  particular is dropped in `ui/context_builder.py` rather than suggested.
+ - **`prior_commitments`** — commitments from earlier meetings whose task, owner,
+   and deadline the *agent itself* read out of the notes. The query both gates on
+   and *selects* the frozen `ai_task`/`ai_owner`/`ai_deadline` columns, never the
+@@ -115,6 +116,24 @@
+ (bypassing the Pydantic validator) — e.g. a human edit round-tripped through the UI —
+ the gate does not stop at schema-level normalisation.
+ 
++**An owner can also be vague rather than invented, and that is just as bad.** A
++manager hit this in real use: the notes said *"someone should chase the vendor
++invoice this week"* and the extraction came back with `owner="someone"` — another
++meeting produced `owner="the team"`. Neither is blank and neither is a placeholder,
++so no `missing_owner` gap fired, the Draft button was enabled, and the follow-up
++went out saying *someone* was chasing the invoice. A category of person is not an
++owner: nobody named there agreed to anything.
++
++`agent.schemas.normalize_owner` maps a non-specific owner to `None`, so it raises
++the same blocking gap a null would. It **wraps** `normalize_optional_text` rather
++than extending `PLACEHOLDER_VALUES`, because the rule belongs to one field:
++"someone has to own the release" is a perfectly good decision rationale. The check
++strips filler words ("the", "whole", "rest of") and rejects the string only if every
++word that remains is generic — so "the whole team" and "we" are blocked while a
++named group like "Platform Team" is kept. It is applied at the schema boundary and
++at all three gate points below, and `tests/test_layer_discipline.py` fails the build
++if any owner check drifts back to the blank-only predicate.
++
+ Triage gets the same treatment, because a model that can talk the loop into a second
+ pass can talk it into inventing an owner. Deterministic code brackets the model on
+ both sides:
+@@ -138,8 +157,8 @@
+ 2. `run_draft` re-checks the gap bookkeeping itself (`open_blocking`), so a UI bug
+    that leaves the button enabled cannot produce an ungated draft.
+ 3. `run_draft` **independently re-verifies every action item's owner and deadline are
+-   actually non-blank**, using `normalize_optional_text` directly on the data — not
+-   the gap records. A gap marked "resolved" is bookkeeping, not proof; this check
++   actually non-blank**, using `normalize_owner`/`normalize_optional_text` directly on
++   the data — not the gap records. A gap marked "resolved" is bookkeeping, not proof; this check
+    does not trust it.
+ 
+ ## Tests
+Only in .: .README.md.swp
+Only in .: .ruff_cache
+diff -ru '--exclude=__pycache__' '--exclude=.claude' '--exclude=.superpowers' '--exclude=data' ./tests/test_context_builder.py tests/test_context_builder.py
+--- ./tests/test_context_builder.py	2026-09-17 20:56:13.343423625 +0530
++++ tests/test_context_builder.py	2026-09-20 02:52:30.211237883 +0530
+@@ -80,3 +80,29 @@
+     ctx = build_context(conn, exclude_meeting_id="other")
+     assert [h.owner for h in ctx.owner_hints] == ["Dan"]
+     assert ctx.prior_commitments == (), "a human's correction leaked into background"
++
++
++def test_a_non_specific_owner_is_dropped_from_both_halves_of_memory(conn):
++    """Rows written before `normalize_owner` existed can hold "someone" as an
++    owner. That is not a name to suggest to a manager, nor a fact to hand a
++    model as background — both memory queries must skip it."""
++    item = ActionItem(id="a1", task="Chase the vendor invoice", owner=None,
++                      deadline=None, source_quote="q", confidence=0.7)
++    meeting_id = db.save_meeting(conn, title="Vendor sync", meeting_date="2026-09-01",
++                                 raw_notes="n")
++    db.save_extraction(conn, meeting_id,
++                       MeetingExtraction(summary="s", participants=[], decisions=[],
++                                         action_items=[item]),
++                       _EMPTY_REVIEW, model="m", prompt_version="v2",
++                       tokens_used=1, latency_ms=1, raw_response="{}")
++    # A legacy row, written straight to storage the way an older build did:
++    # `owner` feeds owner_hints, the frozen `ai_*` pair feeds prior_commitments.
++    db.update_action_item(conn, f"{meeting_id}:item:a1", owner="someone")
++    conn.execute("UPDATE action_items SET ai_owner = 'someone', "
++                 "ai_deadline = '2026-09-25'")
++    conn.commit()
++
++    context = build_context(conn, exclude_meeting_id="m-today")
++    assert context.owner_hints == ()
++    assert context.prior_commitments == ()
++    assert context.is_empty is True
+diff -ru '--exclude=__pycache__' '--exclude=.claude' '--exclude=.superpowers' '--exclude=data' ./tests/test_gap_display.py tests/test_gap_display.py
+--- ./tests/test_gap_display.py	2026-09-17 20:56:13.344423602 +0530
++++ tests/test_gap_display.py	2026-09-20 02:47:12.678332810 +0530
+@@ -360,3 +360,37 @@
+     assert "earlier meetings" in caption
+     assert "completion tracking" in caption
+     assert "background" in caption
++
++
++# --- non-specific owners ------------------------------------------------------
++
++NON_SPECIFIC = ("someone", "the team", "everyone", "we", "whoever")
++
++
++def test_gap_is_not_satisfied_by_a_non_specific_owner():
++    """Typing "someone" into the owner box must not clear the badge."""
++    g = _gap("g1", "a1", GapType.MISSING_OWNER)
++    for owner in NON_SPECIFIC:
++        assert gap_is_satisfied(g, owner, None) is False, owner
++    assert gap_is_satisfied(g, "Priya", None) is True
++
++
++def test_items_missing_fields_flags_a_non_specific_owner():
++    items = [{"id": "a1", "owner": "someone", "deadline": "2026-10-02"},
++             {"id": "a2", "owner": "the team", "deadline": "2026-10-02"},
++             {"id": "a3", "owner": "Priya", "deadline": "2026-10-02"}]
++    assert [i["id"] for i in items_missing_fields(items)] == ["a1", "a2"]
++
++
++def test_draft_blocked_for_a_non_specific_owner():
++    """The reported bug: no gap on record, yet the button must stay disabled."""
++    items = [{"id": "a1", "owner": "someone", "deadline": "2026-10-02"}]
++    assert draft_blocked(items, [], set()) is True
++
++
++def test_owner_suggestion_is_offered_over_a_non_specific_owner():
++    """The field reads as blank to every gate check, so it must read as blank
++    here too — otherwise the one control that helps the manager fix it hides."""
++    hints = (OwnerHint(owner="Dan", times_assigned=3, example_task="t"),)
++    assert owner_suggestion(hints, {"id": "a1", "owner": "someone"}) is not None
++    assert owner_suggestion(hints, {"id": "a1", "owner": "Priya"}) is None
+diff -ru '--exclude=__pycache__' '--exclude=.claude' '--exclude=.superpowers' '--exclude=data' ./tests/test_gaps.py tests/test_gaps.py
+--- ./tests/test_gaps.py	2026-09-16 00:53:49.932575762 +0530
++++ tests/test_gaps.py	2026-09-20 02:47:12.674332899 +0530
+@@ -124,3 +124,23 @@
+               target_id="d1", explanation="reversed later",
+               suggested_question="Which decision stands?")
+     assert is_blocked([gap], resolved_ids={"m1"}) is False
++
++
++def test_non_specific_owner_produces_a_blocking_gap():
++    """Regression: owner="someone" / "the team" must reach the human, not the draft.
++
++    The backstop is the layer that catches this when the value arrives on an
++    already-constructed item (a human edit round-tripped through the UI), so it
++    cannot lean on the schema validator having run.
++    """
++    for owner in ("someone", "the team", "everyone", "we"):
++        item = _item("a1", None, "2026-10-02")
++        item.owner = owner                       # bypasses the Pydantic validator
++        gaps = detect_structural_gaps(_extraction([item]))
++        assert [g.type for g in gaps] == [GapType.MISSING_OWNER], owner
++        assert is_blocked(gaps, resolved_ids=set()) is True, owner
++
++
++def test_a_named_owner_still_produces_no_owner_gap():
++    gaps = detect_structural_gaps(_extraction([_item("a1", "Platform Team", "2026-10-02")]))
++    assert gaps == []
+diff -ru '--exclude=__pycache__' '--exclude=.claude' '--exclude=.superpowers' '--exclude=data' ./tests/test_layer_discipline.py tests/test_layer_discipline.py
+--- ./tests/test_layer_discipline.py	2026-09-17 20:56:13.344423602 +0530
++++ tests/test_layer_discipline.py	2026-09-20 02:49:02.983665724 +0530
+@@ -112,6 +112,40 @@
+                 f"(matched {pattern!r}). Call normalize_optional_text() instead.")
+ 
+ 
++# Every file that decides whether an owner field counts as filled in. Same list
++# as CONVERGED_FILES plus the export, which renders the owner to a human.
++OWNER_GATED_FILES = CONVERGED_FILES + ["ui/markdown_export.py"]
++
++# `normalize_optional_text` applied to anything owner-shaped. It is the right
++# predicate for a deadline or a rationale and the WRONG one for an owner: it
++# passes "someone" and "the team" straight through, which is how a follow-up
++# went out saying someone was chasing a vendor invoice.
++_TEXT_PREDICATE_ON_AN_OWNER = re.compile(
++    r"normalize_optional_text\(\s*[^)]*owner", re.IGNORECASE)
++
++
++def test_owner_checks_all_use_the_shared_owner_predicate():
++    """The owner rule is field-specific, so it gets its own predicate — but it is
++    still ONE predicate, shared, for the same reason `normalize_optional_text` is."""
++    for path in OWNER_GATED_FILES:
++        source = (ROOT / path).read_text()
++        assert "normalize_owner" in source, (
++            f"{path} does not use normalize_owner — an owner check there would "
++            f"accept 'someone' or 'the team'")
++
++
++def test_no_owner_check_uses_the_text_only_predicate():
++    """The absence half: `normalize_optional_text(owner)` is a blank check that
++    is correct about blankness and wrong about owners. There is no valid use of
++    it on an owner field in these files."""
++    for path in OWNER_GATED_FILES:
++        source = (ROOT / path).read_text()
++        match = _TEXT_PREDICATE_ON_AN_OWNER.search(source)
++        assert match is None, (
++            f"{path} gates an owner on {match.group(0)!r} — that predicate lets "
++            f"'someone' and 'the team' through. Call normalize_owner() instead.")
++
++
+ # --- AST undefined-name check -------------------------------------------------
+ #
+ # No test in this suite imports ui/review_view.py, ui/export_view.py or
+diff -ru '--exclude=__pycache__' '--exclude=.claude' '--exclude=.superpowers' '--exclude=data' ./tests/test_pipeline.py tests/test_pipeline.py
+--- ./tests/test_pipeline.py	2026-09-18 12:47:50.661204641 +0530
++++ tests/test_pipeline.py	2026-09-20 02:47:12.681332743 +0530
+@@ -523,3 +523,48 @@
+     outcome = run_triage("audit it by 2026-10-02", gappy_extraction,
+                          [answerable], stub_client([result]))
+     assert [t.verdict for t in outcome.triages] == [TriageVerdict.NEEDS_HUMAN]
++
++
++def test_draft_blocked_for_a_non_specific_owner_string(stub_client, clean_extraction):
++    """Regression: "someone" is not a person. run_draft's own data check must
++    refuse it even when it bypassed schema normalisation (direct assignment
++    after construction, i.e. a human edit round-tripped through the UI)."""
++    for owner in ("someone", "the team", "everyone", "we"):
++        clean_extraction.action_items[0].owner = owner
++        client = stub_client(["draft"])
++        with pytest.raises(GateBlockedError, match="missing an owner or deadline"):
++            run_draft(**_draft_args(clean_extraction, [], set(), client))
++        assert client.calls == []
++
++
++def test_a_non_specific_owner_keeps_the_gate_shut_end_to_end(stub_client):
++    """The reported bug, reproduced at all three gate points.
++
++    A rubber-stamping reviewer returns no gaps and the extraction carries
++    owner="someone". Before the fix: run_review found no gap, draft_blocked was
++    False, and run_draft sent the message.
++    """
++    from ui.gap_display import draft_blocked   # the UI's half of the same gate
++
++    notes = ("Vendor sync — Priya, Sam.\n\n"
++             "someone should chase the vendor invoice this week, by 2026-09-25.")
++    item = ActionItem(id="a1", task="Chase the vendor invoice", owner="someone",
++                      deadline="2026-09-25",
++                      source_quote="someone should chase the vendor invoice",
++                      confidence=0.8)
++    item.owner = "someone"                       # survive the schema validator too
++    extraction = MeetingExtraction(summary="s", participants=["Priya", "Sam"],
++                                   decisions=[], action_items=[item])
++    review_client = stub_client([ReviewResult(gaps=[], overall_confidence=0.9,
++                                              reviewer_notes="Looks complete.")])
++    gaps = run_review(notes, extraction, review_client).review.gaps
++
++    assert [g.type for g in gaps] == [GapType.MISSING_OWNER]
++    rows = [{"id": "a1", "task": item.task, "owner": item.owner,
++             "deadline": item.deadline}]
++    assert draft_blocked(rows, gaps, set()) is True
++    draft_client = stub_client(["Hi team, someone is chasing the invoice."])
++    with pytest.raises(GateBlockedError):
++        run_draft(meeting_title="Vendor sync", decisions=[], action_items=[item],
++                  gaps=gaps, resolved_ids=set(), client=draft_client)
++    assert draft_client.calls == []
+diff -ru '--exclude=__pycache__' '--exclude=.claude' '--exclude=.superpowers' '--exclude=data' ./tests/test_schemas.py tests/test_schemas.py
+--- ./tests/test_schemas.py	2026-09-17 20:56:13.346423556 +0530
++++ tests/test_schemas.py	2026-09-20 02:46:47.836022705 +0530
+@@ -12,11 +12,14 @@
+     MeetingContext,
+     MeetingExtraction,
+     OwnerHint,
++    PLACEHOLDER_VALUES,
+     PriorCommitment,
+     ReviewResult,
+     Severity,
+     TriageResult,
+     TriageVerdict,
++    normalize_optional_text,
++    normalize_owner,
+ )
+ 
+ 
+@@ -170,3 +173,55 @@
+     schema = str(TriageResult.model_json_schema())
+     assert "minimum" not in schema
+     assert "maximum" not in schema
++
++
++# --- non-specific owners ------------------------------------------------------
++#
++# The model, told to emit null when the notes name nobody, sometimes copies the
++# notes' own indefinite wording instead: "someone should chase the vendor
++# invoice" became owner="someone", and "the team" came back from another
++# meeting. Both are non-empty strings, so every blank check believed them.
++
++NON_SPECIFIC_OWNERS = [
++    "someone", "Someone", "  someone  ", "somebody", "anyone", "anybody",
++    "everyone", "everybody", "no one", "nobody", "whoever",
++    "team", "the team", "The Team", "the whole team", "the rest of the team",
++    "group", "the group", "we", "us", "all", "all of us", "they",
++    "someone else", "everyone involved", "the owner", "people",
++]
++
++
++@pytest.mark.parametrize("raw", NON_SPECIFIC_OWNERS)
++def test_action_item_non_specific_owner_normalizes_to_none(raw):
++    """A category of person is not an owner: nobody named here agreed to anything."""
++    item = ActionItem(id="a1", task="Chase the vendor invoice", owner=raw,
++                      deadline="2026-10-02", source_quote="q", confidence=0.8)
++    assert item.owner is None
++
++
++@pytest.mark.parametrize("raw", ["Priya", "Sam Okonkwo", "Mary-Jane", "O'Brien",
++                                 "Platform Team", "Dan and Sam", "Team Rocket"])
++def test_action_item_keeps_an_owner_that_actually_names_somebody(raw):
++    """A named person or a named group is specific; only the generic words go."""
++    item = ActionItem(id="a1", task="t", owner=raw, deadline="2026-10-02",
++                      source_quote="q", confidence=0.8)
++    assert item.owner == raw
++
++
++def test_normalize_owner_wraps_the_shared_blank_predicate():
++    """It must still catch everything `normalize_optional_text` catches."""
++    for placeholder in ("", "   ", "null", "TBD", "N/A", "-", None):
++        assert normalize_owner(placeholder) is None
++
++
++def test_non_specific_words_are_not_added_to_the_shared_placeholder_list():
++    """Field-specific rule, field-specific predicate. "someone" is meaningless as
++    an owner but perfectly ordinary in a rationale, so it must not be swept into
++    `PLACEHOLDER_VALUES`, which every optional text field shares."""
++    assert "someone" not in PLACEHOLDER_VALUES
++    assert "team" not in PLACEHOLDER_VALUES
++    assert normalize_optional_text("someone") == "someone"
++    decision = Decision(id="d1", decision="Ship on Friday",
++                        rationale="someone has to own the release",
++                        source_quote="q", confidence=0.9)
++    assert decision.rationale == "someone has to own the release"
+diff -ru '--exclude=__pycache__' '--exclude=.claude' '--exclude=.superpowers' '--exclude=data' ./ui/context_builder.py ui/context_builder.py
+--- ./ui/context_builder.py	2026-09-17 20:56:13.347423533 +0530
++++ ui/context_builder.py	2026-09-20 02:52:57.256486226 +0530
+@@ -4,7 +4,8 @@
+ plain dicts, and this module converts them into the frozen dataclasses the
+ agent consumes. No Streamlit here — it is pure translation and is unit-tested.
+ """
+-from agent.schemas import MeetingContext, OwnerHint, PriorCommitment
++from agent.schemas import (MeetingContext, OwnerHint, PriorCommitment,
++                           normalize_owner)
+ from storage import memory
+ 
+ 
+@@ -16,16 +17,25 @@
+     memory existed. An empty database yields the same result, which is also
+     the first-meeting-ever case.
+     """
++    # Rows written before `normalize_owner` existed can still hold an owner that
++    # names nobody ("someone", "the team"). Neither half of memory is worth
++    # carrying in that state: suggesting "you have previously assigned work to
++    # someone" is noise, and a BACKGROUND line reading "— someone, due ..." is a
++    # non-answer offered to a model as context. The gate does not depend on this
++    # filter — `normalize_owner` nulls such a value again at the schema boundary
++    # — it just keeps the nonsense off the screen and out of the prompt.
+     try:
+         hints = tuple(
+             OwnerHint(owner=row["owner"], times_assigned=row["times_assigned"],
+                       example_task=row["example_task"])
+-            for row in memory.owner_hints(conn, exclude_meeting_id=exclude_meeting_id))
++            for row in memory.owner_hints(conn, exclude_meeting_id=exclude_meeting_id)
++            if normalize_owner(row["owner"]) is not None)
+         commitments = tuple(
+             PriorCommitment(task=row["task"], owner=row["owner"], deadline=row["deadline"],
+                             meeting_title=row["meeting_title"],
+                             meeting_date=row["meeting_date"])
+-            for row in memory.prior_commitments(conn, exclude_meeting_id=exclude_meeting_id))
++            for row in memory.prior_commitments(conn, exclude_meeting_id=exclude_meeting_id)
++            if normalize_owner(row["owner"]) is not None)
+     except Exception:
+         return MeetingContext()
+     return MeetingContext(prior_commitments=commitments, owner_hints=hints)
+diff -ru '--exclude=__pycache__' '--exclude=.claude' '--exclude=.superpowers' '--exclude=data' ./ui/gap_display.py ui/gap_display.py
+--- ./ui/gap_display.py	2026-09-17 20:56:13.347423533 +0530
++++ ui/gap_display.py	2026-09-20 02:48:01.584441354 +0530
+@@ -1,7 +1,7 @@
+ """Presentation logic for gaps. Pure functions, no Streamlit."""
+ from agent.gaps import is_blocked, open_blocking
+ from agent.schemas import (Gap, GapType, OwnerHint, PriorCommitment, Severity,
+-                           normalize_optional_text)
++                           normalize_optional_text, normalize_owner)
+ 
+ _LABELS = {
+     GapType.MISSING_OWNER: "🔴 No owner",
+@@ -49,7 +49,7 @@
+     """Whether the data now satisfies this gap. Moved out of the view: it decides
+     whether a badge shows, so it needs tests."""
+     if gap.type is GapType.MISSING_OWNER:
+-        return normalize_optional_text(owner) is not None
++        return normalize_owner(owner) is not None
+     if gap.type is GapType.MISSING_DEADLINE:
+         return normalize_optional_text(deadline) is not None
+     return False  # not data-fixable — see needs_manual_resolution
+@@ -83,7 +83,7 @@
+     same condition, or it shows an enabled button that raises on click.
+     """
+     return [i for i in items
+-            if normalize_optional_text(i.get("owner")) is None
++            if normalize_owner(i.get("owner")) is None
+             or normalize_optional_text(i.get("deadline")) is None]
+ 
+ 
+@@ -128,7 +128,7 @@
+     computed. It stays on the dataclass as the query's own output; it is not
+     fit to be presented to a manager as a reason.
+     """
+-    if not hints or normalize_optional_text(item.get("owner")) is not None:
++    if not hints or normalize_owner(item.get("owner")) is not None:
+         return None
+     top = hints[0]
+     times = "once" if top.times_assigned == 1 else f"{top.times_assigned} times"
+diff -ru '--exclude=__pycache__' '--exclude=.claude' '--exclude=.superpowers' '--exclude=data' ./ui/markdown_export.py ui/markdown_export.py
+--- ./ui/markdown_export.py	2026-09-16 00:53:49.937575649 +0530
++++ ui/markdown_export.py	2026-09-20 02:48:01.584632499 +0530
+@@ -1,7 +1,7 @@
+ """Builds the downloadable Markdown artefact. Pure functions, no Streamlit."""
+ import re
+ 
+-from agent.schemas import normalize_optional_text
++from agent.schemas import normalize_optional_text, normalize_owner
+ 
+ # What an unset owner or deadline looks like in the document. Interpolating the
+ # value directly printed Python's `None` as the literal word "None", which reads
+@@ -19,7 +19,7 @@
+     # "- (none recorded)" fallback: a decisions-only meeting used to emit a bare
+     # "## Action items" heading with nothing under it.
+     lines += [f"- **{item['task']}**"
+-              f" — {normalize_optional_text(item.get('owner')) or BLANK}"
++              f" — {normalize_owner(item.get('owner')) or BLANK}"
+               f" — due {normalize_optional_text(item.get('deadline')) or BLANK}"
+               for item in items] or ["None recorded."]
+     lines += ["", "## Follow-up message", "", message, ""]
+diff -ru '--exclude=__pycache__' '--exclude=.claude' '--exclude=.superpowers' '--exclude=data' ./ui/review_view.py ui/review_view.py
+--- ./ui/review_view.py	2026-09-17 20:56:13.348423511 +0530
++++ ui/review_view.py	2026-09-20 02:48:28.771700371 +0530
+@@ -4,7 +4,7 @@
+ import streamlit as st
+ 
+ from agent.gaps import open_blocking
+-from agent.schemas import Gap, normalize_optional_text
++from agent.schemas import Gap, normalize_optional_text, normalize_owner
+ from storage import db
+ from ui.gap_display import (PRIOR_COMMITMENTS_CAPTION, badge, draft_blocked,
+                             gap_is_satisfied, gaps_for_item, gate_message,
+@@ -84,7 +84,7 @@
+         st.caption("A new item needs an owner and a deadline — that is the whole "
+                    "point of the gate.")
+         can_add = bool(new_task.strip()
+-                       and normalize_optional_text(new_owner) is not None
++                       and normalize_owner(new_owner) is not None
+                        and normalize_optional_text(new_deadline) is not None)
+         if st.button("Add", disabled=not can_add):
+             try:
+@@ -93,7 +93,7 @@
+                 st.error(str(exc))
+             else:
+                 db.add_action_item(conn, meeting_id, task=new_task,
+-                                   owner=normalize_optional_text(new_owner), deadline=deadline)
++                                   owner=normalize_owner(new_owner), deadline=deadline)
+                 for key in ("new_task", "new_owner", "new_deadline"):
+                     st.session_state.pop(key, None)
+                 st.rerun()
+@@ -136,8 +136,8 @@
+     participants").
+     """
+     detected = json.loads(meta["participants"]) if meta else []
+-    named = {normalize_optional_text(p) for p in detected}
+-    named |= {normalize_optional_text(i["owner"]) for i in items}
++    named = {normalize_owner(p) for p in detected}
++    named |= {normalize_owner(i["owner"]) for i in items}
+     return sorted(n for n in named if n is not None)
+ 
+ 
+@@ -201,10 +201,11 @@
+         task = st.text_input("Task", value=item["task"], key=f"t_{item['id']}")
+         col1, col2 = st.columns(2)
+         # Defaults go through the shared predicate too, not a bare `or ""`: a row
+-        # holding a placeholder ("null", "TBD") must show as blank, because blank
+-        # is what every gate check already believes it to be.
++        # holding a placeholder ("null", "TBD") or a word that names nobody
++        # ("someone", "the team") must show as blank, because blank is what every
++        # gate check already believes it to be.
+         owner = col1.text_input("Owner",
+-                                value=normalize_optional_text(item["owner"]) or "",
++                                value=normalize_owner(item["owner"]) or "",
+                                 placeholder="not stated in the notes",
+                                 key=f"o_{item['id']}")
+         deadline_text = col2.text_input(
+@@ -241,7 +242,7 @@
+                 st.error(str(exc))
+             else:
+                 db.update_action_item(conn, item["id"], task=task,
+-                                      owner=normalize_optional_text(owner), deadline=deadline)
++                                      owner=normalize_owner(owner), deadline=deadline)
+                 for gap in gaps_for_item(gaps, item["id"]):
+                     if needs_manual_resolution(gap):
+                         continue  # a human's "I have handled this" is not something
+Only in .: .venv

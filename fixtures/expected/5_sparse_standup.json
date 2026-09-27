@@ -1,0 +1,9 @@
+{
+  "slug": "5_sparse_standup",
+  "expected_action_items": [],
+  "expected_decisions": [],
+  "expected_blocking_gap_count": 0,
+  "expected_missing_owner_count": 0,
+  "expected_max_overall_confidence": 0.5,
+  "must_not_fabricate": ["sam", "dan", "alia", "priya"]
+}
